@@ -3,8 +3,8 @@
 分类独立性检验的真实业务分析小型项目。完整模拟客户、痛点、上下游、算法公式与一天工作剧本见 [BUSINESS.md](BUSINESS.md)。
 
 ## 模块与业务流程
-数据接入（JSON/CSV、字段验证、批次指纹）→ 参数化分析（异步 Python worker）→ 结果复核（指标、图形、明细、解释、批准）→ 定时分发（本地收件箱、CSV/JSON、SHA256）；另有业务总览和审计轨迹。
-三个贯穿全栈的实体：Dataset 数据批次、Job 分析任务、Report 分发计划；辅助 User、Audit、Delivery。
+数据接入（JSON/CSV 手工批次、字段验证、批次指纹；或登记远端客流源后分页快照同步）→ 参数化分析（异步 Python worker）→ 结果复核（指标、图形、明细、解释、批准）→ 定时分发（本地收件箱、CSV/JSON、SHA256）；另有业务总览和审计轨迹。
+三个贯穿全栈的实体：Dataset 数据批次、Job 分析任务、Report 分发计划；辅助 User、Audit、Delivery、RemoteSource、SourceVersion、SyncRun。
 
 ## 快速启动
 ```bash
@@ -14,6 +14,30 @@ docker compose exec -T backend python -m scripts.seed_demo
 ```
 访问 http://localhost:18204；后端文档 http://localhost:19204/docs；数据库宿主端口 17704。
 `SEED_DEMO=true` 自动幂等 seed；不覆盖用户修改。手动 seed 命令可重复执行。
+
+## 远端客流源同步
+页面「远端客流源」登记来源（地址、可选令牌、分页大小）后，worker 按分页快照协议同步为分析批次：
+- 一次同步固定一个来源快照：翻页期间来源侧的新增、更正、撤除只进入下一次同步。
+- 每确认一页即落库；进程停机后从已确认游标继续，不重复拉取。
+- 游标失效（HTTP 410）即作废本次暂存、从空白游标重新取整份；同一运行绝不拼接两个快照，来源在翻页中切换快照会被拒绝。
+- 整份记录通过与手工接入相同的校验后，新数据集、新版本与来源当前版本指针在同一事务提交，一次性切换；任何失败沿用旧版。
+- 同一来源同一时间最多一个进行中的同步（数据库部分唯一索引约束），并发发起与重试复用同一运行，不重复建批次。
+- 工作台选择「远端来源 · 当前版本」发起分析时，任务在入队时固定当时版本；来源之后切换新版本不影响已排队任务。手工批次照常可用。
+
+演示来源（可独立启动，模拟翻页中改数、断连、游标过期）：
+```bash
+docker compose --profile demo up -d --build --wait   # 随栈启动，宿主端口 18104
+python demo-source/server.py                          # 或完全独立运行（PORT 环境变量，默认 8100）
+```
+`DEMO_SOURCE_URL` 非空时 seed 自动登记「演示远端客流源」（compose 默认指向 demo-source 服务；未启用 demo profile 时同步会给出连接失败原因）。演练控制：
+```bash
+curl -X POST localhost:18104/control -d '{"mutate_per_page":3}'   # 翻页中改数（新增/更正/撤除）
+curl -X POST localhost:18104/control -d '{"drop_rate":0.4}'       # 断连
+curl -X POST localhost:18104/control -d '{"snapshot_ttl":6}'      # 游标过期
+curl -X POST localhost:18104/control -d '{"corrupt_next":true}'   # 下一快照混入非法记录（整份校验失败）
+curl -X POST localhost:18104/control -d '{"reset":true,"drop_rate":0,"snapshot_ttl":120,"mutate_per_page":1}'
+curl localhost:18104/control/state                                # 线上行数与各快照校验和
+```
 
 ## 演示账号与权限
 |账号|密码|真实权限|
@@ -27,13 +51,13 @@ Python 3.12 / FastAPI / SQLAlchemy / NumPy / SciPy / scikit-learn；PostgreSQL 1
 后端：安装 backend/requirements.txt，设置 DATABASE_URL、REDIS_URL、JWT_SECRET、ARTIFACT_DIR 后在 backend/ 执行 `python -m migrations.initial`、`python -m scripts.seed_demo`、`uvicorn src.main:app`，另开 `python -m src.worker`。前端使用带 /api 反向代理的 Nginx，直接打开 index.html 不支持 API。
 
 ## 目录与工程约定
-backend/src/{models,schemas,services,routes,controllers,middlewares,constants,config,utils}；backend/scripts/seed_demo.py；backend/migrations/initial.py。
+backend/src/{models,schemas,services,routes,controllers,middlewares,constants,config,utils}；backend/scripts/seed_demo.py；backend/migrations/initial.py；demo-source/server.py（独立演示客流源，仅用标准库）。
 frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。
 Role 枚举：admin/analyst/viewer；JobStatus：queued/running/completed/failed。后端 backend/src/constants/enums.py，前端 frontend/src/constants/enums.js；路由权限在 middlewares/auth.py；页面按相同角色控制操作入口。
 
 ## 环境变量与 Docker
-COMPOSE_PROJECT_NAME=guide-chi；FRONTEND_PORT=18204；BACKEND_PORT=19204；DB_PORT=17704；DB_PASSWORD、JWT_SECRET 见 .env.example；SEED_DEMO 默认 true。共享命名产物卷供后端下载与 worker 写入，数据库/Redis 各持久卷。
-恰好五服务均有健康检查。Redis 队列加 SQL 排队状态兜底；worker 按 next_run 生成本地收件箱文件。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。
+COMPOSE_PROJECT_NAME=guide-chi；FRONTEND_PORT=18204；BACKEND_PORT=19204；DB_PORT=17704；DEMO_SOURCE_PORT=18104；DB_PASSWORD、JWT_SECRET、DEMO_SOURCE_URL 见 .env.example；SEED_DEMO 默认 true。共享命名产物卷供后端下载与 worker 写入，数据库/Redis 各持久卷。
+核心五服务（db、redis、backend、worker、frontend）均有健康检查；可选 demo-source 服务（profile `demo`）同样带健康检查，可随栈或独立启动。Redis 队列加 SQL 排队状态兜底（Redis 不可用时 worker 仍按 SQL 状态执行分析与同步）；worker 按 next_run 生成本地收件箱文件。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。
 错误响应、请求编号、Redis 每 IP 每分钟 240 次限流、JWT 和数据库操作审计。演示密钥与密码仅供本机模拟；生产部署前配置独立密钥与账号。
 
 ## 数据与验收

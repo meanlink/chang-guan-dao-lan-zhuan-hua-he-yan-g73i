@@ -33,6 +33,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-guide-chi-development-only}
       SEED_DEMO: ${SEED_DEMO:-true}
       ARTIFACT_DIR: /artifacts
+      DEMO_SOURCE_URL: ${DEMO_SOURCE_URL:-http://demo-source:8100}
     ports: ["${BACKEND_PORT:-19204}:8000"]
     volumes: ["analysis-artifacts:/artifacts"]
     depends_on:
@@ -67,6 +68,22 @@ services:
       backend: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 4s
+      timeout: 3s
+      retries: 20
+  # 可选演示客流源：docker compose --profile demo up -d --build --wait
+  # 也可完全独立启动：python demo-source/server.py（PORT 环境变量）
+  demo-source:
+    build: ./demo-source
+    profiles: ["demo"]
+    container_name: ${COMPOSE_PROJECT_NAME:-guide-chi}-demo-source
+    environment:
+      PORT: 8100
+      DEMO_DAYS: ${DEMO_DAYS:-26}
+      DEMO_SEED: ${DEMO_SEED:-2026}
+    ports: ["${DEMO_SOURCE_PORT:-18104}:8100"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
       interval: 4s
       timeout: 3s
       retries: 20
